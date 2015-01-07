@@ -1,0 +1,263 @@
+#include <Winsock2.h>
+#include <Ws2tcpip.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <iphlpapi.h>
+#pragma comment(lib,"Ws2_32.lib")
+#pragma comment(lib, "iphlpapi.lib")
+
+//初始化套接字
+void InitSocket()
+{
+	WORD wVersionRequested;
+	WSADATA wsaData;
+	int err;
+	wVersionRequested = MAKEWORD( 2, 2 );
+	err = WSAStartup( wVersionRequested, &wsaData );
+	if ( err != 0 ) {
+		return;
+	}
+	if ( LOBYTE( wsaData.wVersion ) != 2 ||
+		HIBYTE( wsaData.wVersion ) != 2 ) {
+			WSACleanup( );
+			return; 
+	}
+}
+//icmp包结构
+typedef struct _ICMPPACK
+{
+	unsigned char icmp_type;  //消息类型
+	unsigned char icmp_code;  //清息代码
+	unsigned short icmp_checksum; //16位效验
+
+	unsigned short icmp_id;//用来唯一标识些请求的ID号
+	unsigned short icmp_sequence; //序列号
+	unsigned long icmp_timestamp; //时间戳
+
+}ICMPPACK, *PICMPPACK;
+
+
+//设置超时时间
+BOOL SetTimeOut(SOCKET s,int nTime,BOOL bRecv)
+{
+	int nRet = setsockopt(s, SOL_SOCKET, bRecv ? SO_RCVTIMEO : SO_SNDTIMEO, (char *)&nTime, sizeof(nTime));
+	if(SOCKET_ERROR == nRet)
+	{
+		return false;
+	}
+	return true;
+}
+
+//获得生存时间
+int GetTTL(SOCKET s)
+{
+	int TTLCounts;
+	int nLen=sizeof(TTLCounts);
+	int nRet=getsockopt(s,IPPROTO_IP,IP_TTL,(char *)&TTLCounts,&nLen);
+	return TTLCounts;
+}
+
+//检验校验和 计算机网络P195页有计算UDP校验和的例子
+unsigned short checksum(unsigned short *buff,int size)
+{
+	unsigned long cksum=0;
+	while(size>1)
+	{
+		cksum+=*buff++;
+		size-=sizeof(unsigned short);
+	}
+	if(size) //如果size为奇数字节
+	{
+		cksum+=*(unsigned char*)buff;
+	}
+	cksum=(cksum>>16)+(cksum&0xffff);
+	cksum+=cksum>>16;
+	return (unsigned short)(~cksum);
+}
+
+
+int main(int argc, CHAR* argv[])
+{
+	InitSocket();
+	SOCKET sRaw=socket(AF_INET,SOCK_RAW,IPPROTO_ICMP);
+	if(INVALID_SOCKET == sRaw)
+	{
+		printf("failed to create raw socket\n");
+		return 0;
+	}
+	if(!SetTimeOut(sRaw,1000,true)) //设置 接收超时时间 1000毫秒
+	{
+		printf("failed to set recv time out\n");
+		closesocket(sRaw);
+		return 0;
+	}
+	//设置目标地址
+
+	char szDestIp[16]; 
+	printf("请输入IP："); 
+
+	sockaddr_in desAddr;
+
+	//填充目的端sock地址
+	desAddr.sin_addr.S_un.S_addr=inet_addr(gets(szDestIp));
+
+	//通过目的主机的IP得到MAC地址！！
+	DWORD dw;
+	ULONG MacAddr[2];
+	ULONG PhysAddrLen = 6;
+	BYTE *bPhysAddr;
+	memset(&MacAddr,0xff,sizeof(MacAddr)); //填充数据
+	dw = SendARP(inet_addr(szDestIp),INADDR_ANY,&MacAddr,&PhysAddrLen);
+	if (dw == NO_ERROR) 
+	{
+		bPhysAddr = (BYTE *) & MacAddr;
+		if (PhysAddrLen)
+		{
+			printf("IP为 %s 的主机的MAC地址为：",szDestIp);
+			for (int i = 0; i < (int) PhysAddrLen; i++) 
+			{
+				if (i == (PhysAddrLen - 1))
+					printf("%.2X\n", (int) bPhysAddr[i]);
+				else
+					printf("%.2X-", (int) bPhysAddr[i]);
+			}
+		} else
+			printf
+			("Warning: SendArp completed successfully, but returned length=0\n");
+
+	} 
+	else {
+		printf("Error: SendArp failed with error: %d", dw);
+		switch (dw) 
+		{
+		case ERROR_GEN_FAILURE:
+			printf(" (ERROR_GEN_FAILURE)\n");
+			break;
+		case ERROR_INVALID_PARAMETER:
+			printf(" (ERROR_INVALID_PARAMETER)\n");
+			break;
+		case ERROR_INVALID_USER_BUFFER:
+			printf(" (ERROR_INVALID_USER_BUFFER)\n");
+			break;
+		case ERROR_BAD_NET_NAME:
+			printf(" (ERROR_GEN_FAILURE)\n");
+			break;
+		case ERROR_BUFFER_OVERFLOW:
+			printf(" (ERROR_BUFFER_OVERFLOW)\n");
+			break;
+		case ERROR_NOT_FOUND:
+			printf(" (ERROR_NOT_FOUND)\n");
+			break;
+		default:
+			printf("\n");
+			break;
+		}
+	}
+
+
+	desAddr.sin_port=htons(0);
+	desAddr.sin_family=AF_INET;
+
+	char buff[sizeof(ICMPPACK)+32];  //创建发送缓冲区，ICMPPACK只是ICMP报文的头部，32为ICMP报文默认数字字段长度
+	PICMPPACK pICMP=(PICMPPACK)buff;
+
+	//填充ICMP报文
+	pICMP->icmp_type=8; //请求回显ICMP_ECHO_REQUEST = 8
+	pICMP->icmp_code=0;
+	pICMP->icmp_checksum=0;
+	pICMP->icmp_id=(unsigned short)GetCurrentProcessId();//获得当前进程ID
+	//pICMP->icmp_sequence=0; //序列号
+	pICMP->icmp_timestamp=0; //时间戳
+
+	memset(&buff[sizeof(ICMPPACK)],'E',32);  //填充用户数据 用'E'填充发送缓冲区
+
+	unsigned short nSeq=0;
+	char recvBuf[1024]; //接收缓冲区
+	sockaddr_in from;
+	int nLen=sizeof(sockaddr_in);
+	int count=4;
+	int sendnum =0;
+	int recvnum = 0;
+	int nRet;
+	unsigned long mintime = -1;
+	unsigned long maxtime = 0;
+	unsigned long totaltime = 0;
+	while(count--)
+	{
+
+		pICMP->icmp_checksum=0;
+		//pICMP->icmp_sequence=nSeq++; //序号
+		pICMP->icmp_timestamp=GetTickCount();//当前时间
+		pICMP->icmp_checksum=checksum((unsigned short *)buff,sizeof(ICMPPACK)+32);//检查校验和
+
+		nRet = sendto(sRaw,buff,sizeof(ICMPPACK)+32,0,(sockaddr *)&desAddr,sizeof(desAddr));
+		if(nRet != SOCKET_ERROR)
+			sendnum++;
+		if(nRet == SOCKET_ERROR) //判断发送是否成功
+		{
+			printf("sendto() failed \n");
+			closesocket(sRaw);
+			return 0;
+		}
+
+		//recvfrom返回接收到的字节数
+		nRet = recvfrom(sRaw,recvBuf,1024,0,(sockaddr *)&from,&nLen);
+		if(nRet != SOCKET_ERROR)
+			recvnum++;
+		if(nRet == SOCKET_ERROR)
+		{
+			if(WSAGetLastError() == WSAETIMEDOUT)
+			{
+				printf("time out \n");
+				continue;
+			}
+			else
+			{
+				printf("recvfrom() failed \n");
+				closesocket(sRaw);
+				return 0;
+			}
+		}
+		unsigned long nTick = GetTickCount();  //当前时间
+
+		//判断接收到的数据报是否合法
+		if(nRet < 20 + sizeof(ICMPPACK)) //20为IP数据报头部大小 ICMP + 20 = IP
+		{
+			printf("too few bytes from %s \n",inet_ntoa(from.sin_addr));
+			continue;
+		}
+
+		ICMPPACK *pTemp = (ICMPPACK *)(recvBuf+20);
+		if(pTemp->icmp_type != 0 ) //icmp_type =0 表示回显应答
+		{
+			printf(" nonecho type recvd \n");
+			closesocket(sRaw);
+			return 0;
+		}
+		if(pTemp->icmp_id != (unsigned short)GetCurrentProcessId())//ID不等
+		{
+			printf("some one else packet");
+			closesocket(sRaw);
+			return 0;
+		}
+		//如果合法则打印相应数据
+		unsigned long a;
+		a = nTick-pTemp->icmp_timestamp;
+
+		if(a > maxtime)
+			maxtime = a;
+		if(a < mintime)
+			mintime = a;
+		totaltime += (nTick - pTemp->icmp_timestamp);
+
+		printf("来自 %s 的回复：字节=%d 时间=%lums  TTL=%d\n",
+			inet_ntoa(from.sin_addr),nRet,nTick-pTemp->icmp_timestamp,GetTTL(sRaw));
+		Sleep(1000);
+	}
+	printf("\n%s 的 ping 统计信息：\n",inet_ntoa(from.sin_addr));
+	printf("   数据包：已发送 = %d，已接收 = %d，丢失 = %d,\n",sendnum,recvnum,sendnum - recvnum);
+	printf("往返行程的估计时间（以毫秒为单位）：\n");
+	printf("   最短 = %lums，最长 = %lums，平均 = %lums\n",mintime,maxtime,totaltime/recvnum);
+	return 0;
+} 
