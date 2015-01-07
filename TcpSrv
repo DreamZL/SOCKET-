@@ -41,7 +41,7 @@ void main()
 											//inet_ntoa接受一个in_addr结构体类型的参数返回一个点分十进制的字符串
 		send(sockConn,sendBuf,strlen(sendBuf)+1,0);//发送数据给客户端
 		char recvBuf[100];
-		recv(sockConn,recvBuf,100,0);//从客户端接收数据
+		recv(sockConn,recvBuf,100,0);// 从客户端接收数据
 		printf("%s\n",recvBuf);
 		closesocket(sockConn);
 	}
