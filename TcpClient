@@ -1,0 +1,38 @@
+#include <stdio.h>
+#include <Winsock2.h>
+void main()
+{
+	WORD wVersionRequested;
+	WSADATA wsaData;
+	int err;
+	
+	wVersionRequested = MAKEWORD( 1, 1 ); //请求一个1.1版本的winSock DLL
+	
+	err = WSAStartup( wVersionRequested, &wsaData );
+	if ( err != 0 ) {
+		return;
+	}
+	
+	
+	if ( LOBYTE( wsaData.wVersion ) != 1 ||
+        HIBYTE( wsaData.wVersion ) != 1 ) {
+		WSACleanup( ); //如果版本不是1.1的就终止对WinSock DLL的使用
+		return; 
+	}
+	SOCKET sockClient = socket(AF_INET,SOCK_STREAM,0);
+
+	SOCKADDR_IN addrSrv;
+	addrSrv.sin_addr.S_un.S_addr = inet_addr("127.0.0.1");//服务器的地址。127.0.0.1是本地回路地址，用于测试
+														//inet_addr接受一个点分十进制的字符串返回一个u_long类型的值
+	addrSrv.sin_family = AF_INET;
+	addrSrv.sin_port = htons(6000);//host to network返回short
+	connect(sockClient,(SOCKADDR*)&addrSrv,sizeof(SOCKADDR));//与服务器建立连接
+
+	char recvBuf[100];
+	recv(sockClient,recvBuf,100,0);//接收数据
+	printf("%s\n",recvBuf);
+	send(sockClient,"This is zhaolong",strlen("This is zhaolong")+1,0);//给服务器发送数据
+
+	closesocket(sockClient);//关闭套接字
+	WSACleanup();//终止对套接字库的使用
+}
